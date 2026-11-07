@@ -34,35 +34,27 @@ To completely solve single-threaded throughput limits on 50 GB+ Remuxes, build a
 
 ---
 
-## 3. Implementation Plan for Antigravity
+## 3. Implementation Status & Summary
 
-Follow these phases inside Antigravity to build, test, and deploy the upgraded local addon proxy.
+All engineering phases have been implemented, tested, and pushed to the repository.
 
-### Step 1: Environment & Project Setup
-* Clone or initialize your local fork of the Easynews Stremio addon codebase in Antigravity.
-* Set up a local Node.js / Docker development container.
+### Step 1: Environment & Project Setup (Completed)
+* Configured local `pnpm` monorepo workspace and Node 24 multi-stage `Dockerfile`.
+* Added `docker-compose.yml` for Portainer stack deployment.
 
-### Step 2: Implement Codec Filtering Logic
-* Modify `addon.js` / stream parser logic to inspect stream titles and metadata:
-  ```javascript
-  // Example filter logic pseudo-code
-  function filterStreams(streams, userConfig) {
-      return streams.filter(stream => {
-          if (userConfig.excludeTrueHD && stream.title.includes("TrueHD")) {
-              return false;
-          }
-          return true;
-      });
-  }
-  ```
+### Step 2: Implement Codec Filtering Logic (Phase 1 - Completed)
+* Built `filter.ts` with audio tag extraction (`TrueHD`, `Atmos`, `DTS-HD (MA / DTS:X)`, `DDP/E-AC3`, `AAC`).
+* Configurable smart file size ceilings (`5 GB` – `50 GB`).
+* Audio exclusions (`excludeTrueHD`, `excludeDTSHD`) and lossy stream prioritization (`deprioritizeLosslessAudio`).
+* Visual audio codec badges displayed on Stremio stream selection cards (`🔊 TrueHD / Atmos`).
+* Verified with unit tests in `filter.test.ts`.
 
-### Step 3: Build the Multi-Connection Proxy Module
-* Create a new module (`proxy.js`) utilizing Node.js `http` and `stream` pipelines to handle multi-range chunk requests:
-  * Parse incoming `Range` headers from ExoPlayer.
-  * Spawn concurrent `axios` or `node-fetch` range requests.
-  * Buffer and pipe segments sequentially to the client response stream.
+### Step 3: Build Multi-Connection Proxy & JIT Redirect Resolver (Phases 2 & 3 - Completed)
+* Built `proxy.ts` to perform manual `HEAD` requests using local IP/credentials, extracting pre-signed edge CDN redirect URLs (`ams-dl-01.easynews.com`) with a 1-hour TTL cache.
+* Built `multi-downloader.ts` opening 4 to 8 parallel HTTP Range requests concurrently, feeding an in-memory sliding buffer (`~48 MB RAM`) with client backpressure handling.
+* Verified with unit and integration tests in `proxy.test.ts` and `multi-downloader.test.ts` (42 tests total).
 
-### Step 4: Verification & Benchmarking
-* Run the local addon container.
-* Point Stremio on Android TV to the local addon instance.
-* Monitor network throughput metrics and buffer stability using Kodi external player stats (`O` key) or router bandwidth monitors during a high-bitrate 4K Remux playback test.
+### Step 4: Portainer Deployment & Zero-Port-Forwarding Local SSL (Completed)
+* **Environment Credentials**: `EASYNEWS_USERNAME` and `EASYNEWS_PASSWORD` configured in container environment variables to allow 1-click install without credentials in URLs.
+* **Local LAN Zero-Port-Forwarding SSL (DuckDNS + Caddy DNS-01)**: Solves the browser "Failed to fetch" error on `web.stremio.com` by using DuckDNS with DNS-01 challenge. Points to your local LAN IP without opening any ports on your router.
+* **Pure Local HTTP**: For Stremio Android TV and Desktop apps, direct local LAN IP `http://<SERVER_IP>:1337/manifest.json` works natively without domains or SSL.

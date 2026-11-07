@@ -96,6 +96,81 @@ Navigate to `http://localhost:1337/` in your browser to verify that the addon is
 $ PORT=8080 pnpm start:addon
 ```
 
+### Portainer / Docker Compose (Local & Self-Hosted)
+
+The included `docker-compose.yml` allows running the addon with the multi-connection streaming proxy and automated HTTPS.
+
+#### 1. Zero-Port-Forwarding Local HTTPS via DuckDNS (Fixes "Failed to Fetch")
+Web browsers running `web.stremio.com` require HTTPS. You can get a 100% valid, trusted SSL certificate pointing to your private LAN IP with **zero ports opened on your router**:
+
+1. Create a free subdomain on [duckdns.org](https://www.duckdns.org) and set the IP to your **server's local LAN IP** (e.g. `192.168.1.100`). Copy your DuckDNS Token.
+2. In Portainer (**Stacks** > **+ Add stack**), deploy from this repository (`https://github.com/charlietrp77-cmd/stremio-easynews-addon.git`) or paste `docker-compose.yml`:
+   ```yaml
+   services:
+     stremio-easynews-addon:
+       build:
+         context: https://github.com/charlietrp77-cmd/stremio-easynews-addon.git
+         dockerfile: Dockerfile
+       image: stremio-easynews-addon:latest
+       container_name: stremio-easynews-addon
+       restart: unless-stopped
+       expose:
+         - "1337"
+       environment:
+         - PORT=1337
+         - EASYNEWS_USERNAME=your_easynews_username
+         - EASYNEWS_PASSWORD=your_easynews_password
+         - PROXY_URL=https://yoursubdomain.duckdns.org
+         - CONCURRENT_CHUNKS=4
+         - CHUNK_SIZE_MB=4
+         - MAX_BUFFER_CHUNKS=12
+         - ENABLE_LOCAL_PROXY=true
+         - ENABLE_MULTI_CHUNK=true
+
+     caddy:
+       build:
+         context: https://github.com/charlietrp77-cmd/stremio-easynews-addon.git
+         dockerfile: Dockerfile.caddy
+       image: caddy-duckdns:latest
+       container_name: caddy-easynews-ssl
+       restart: unless-stopped
+       ports:
+         - "443:443"
+       environment:
+         - DUCKDNS_DOMAIN=yoursubdomain.duckdns.org
+         - DUCKDNS_TOKEN=your_duckdns_token
+       volumes:
+         - caddy_data:/data
+         - caddy_config:/config
+
+   volumes:
+     caddy_data:
+     caddy_config:
+   ```
+3. Caddy validates the certificate via DuckDNS DNS API records (**DNS-01 challenge**) without needing router ports 80 or 443 open.
+4. Install in Stremio: `https://yoursubdomain.duckdns.org/manifest.json`.
+
+#### 2. Pure Local LAN Setup (Android TV / Desktop Apps)
+If you only play via Stremio Desktop or Android TV, plain HTTP works natively without SSL:
+```yaml
+services:
+  stremio-easynews-addon:
+    build:
+      context: https://github.com/charlietrp77-cmd/stremio-easynews-addon.git
+      dockerfile: Dockerfile
+    image: stremio-easynews-addon:latest
+    container_name: stremio-easynews-addon
+    restart: unless-stopped
+    ports:
+      - "1337:1337"
+    environment:
+      - PORT=1337
+      - EASYNEWS_USERNAME=your_username
+      - EASYNEWS_PASSWORD=your_password
+      - PROXY_URL=http://<YOUR_LOCAL_SERVER_IP>:1337
+```
+Install in Stremio: `http://<YOUR_LOCAL_SERVER_IP>:1337/manifest.json`.
+
 ### High-Performance Local Streaming Proxy (4K Blu-Ray Remuxes)
 
 When self-hosting on your local network (PC, home server, NAS, or Docker), the addon includes a built-in multi-connection streaming proxy with JIT redirect resolution:
