@@ -12,38 +12,40 @@ services:
       - PORT=1337
 
       # =========================================================================
-      # EASYNEWS CREDENTIALS (NO URL SETUP NEEDED!):
+      # 1. YOUR EASYNEWS ACCOUNT CREDENTIALS:
       # =========================================================================
       - EASYNEWS_USERNAME=your_username_here
       - EASYNEWS_PASSWORD=your_password_here
 
       # =========================================================================
-      # PUBLIC HTTPS PROXY URL (HANDLED BY CADDY):
-      # Set this to your domain (e.g. https://easynews.yourdomain.com)
+      # 2. YOUR DUCKDNS DOMAIN (REPLACE WITH YOUR SUBDOMAIN):
       # =========================================================================
-      - PROXY_URL=https://${DOMAIN_NAME:-easynews.yourdomain.com}
+      - PROXY_URL=https://${DUCKDNS_DOMAIN:-yoursubdomain.duckdns.org}
 
-      # Streaming Performance & Multi-Connection Tuning (Phases 2 & 3)
-      - CONCURRENT_CHUNKS=4       # Parallel connections to CDN (4 to 8 recommended for 4K Remux)
-      - CHUNK_SIZE_MB=4           # Size of each chunk in megabytes (default 4 MB)
-      - MAX_BUFFER_CHUNKS=12      # In-memory sliding buffer size (~48 MB RAM)
-      - ENABLE_LOCAL_PROXY=true   # JIT redirect resolution & local proxying
-      - ENABLE_MULTI_CHUNK=true   # Multi-connection range streaming for high bitrates
+      # 4K Remux Multi-Connection Tuning
+      - CONCURRENT_CHUNKS=4       # 4 to 8 parallel range streams to Easynews CDN
+      - CHUNK_SIZE_MB=4           # 4 MB chunk size
+      - MAX_BUFFER_CHUNKS=12      # ~48 MB RAM buffer window
+      - ENABLE_LOCAL_PROXY=true
+      - ENABLE_MULTI_CHUNK=true
 
   # =============================================================================
-  # CADDY: AUTOMATIC ZERO-CONFIG HTTPS REVERSE PROXY
-  # Obtains and auto-renews free trusted SSL certificates from Let's Encrypt
+  # CADDY (WITH DUCKDNS DNS-01 CHALLENGE):
+  # Obtains a 100% valid, trusted HTTPS SSL certificate WITHOUT opening any
+  # ports on your router!
   # =============================================================================
   caddy:
-    image: caddy:alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    image: caddy-duckdns:latest
     container_name: caddy-easynews-ssl
     restart: unless-stopped
     ports:
-      - "80:80"
       - "443:443"
     environment:
-      - DOMAIN_NAME=${DOMAIN_NAME:-easynews.yourdomain.com}
-    command: caddy reverse-proxy --from ${DOMAIN_NAME:-easynews.yourdomain.com} --to stremio-easynews-addon:1337
+      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN:-yoursubdomain.duckdns.org}
+      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN:-your_duckdns_token_here}
     volumes:
       - caddy_data:/data
       - caddy_config:/config

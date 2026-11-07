@@ -1,0 +1,11 @@
+{
+    # Global options
+}
+
+{$DUCKDNS_DOMAIN} {
+    tls {
+        dns duckdns {$DUCKDNS_TOKEN}
+    }
+
+    reverse_proxy stremio-easynews-addon:1337
+}
