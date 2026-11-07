@@ -5,18 +5,30 @@ import { MultiChunkDownloader } from './multi-downloader.js';
 
 interface CacheEntry {
   resolvedUrl: string;
-  totalSize?: number;
-  contentType?: string;
   expiresAt: number;
 }
 
-// In-memory cache for resolved CDN edge URLs and metadata
+// In-memory cache for resolved CDN edge URLs
 // Keyed by original target URL. TTL: 1 hour.
 export const redirectCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 // Minimum range size (2 MB) before engaging multi-connection downloader
 const MULTI_CHUNK_THRESHOLD = 2 * 1024 * 1024;
+
+/**
+ * Returns the proper video MIME type based on filename or URL.
+ * ExoPlayer strictly requires a valid video MIME type or file extension to instantiate extractors.
+ */
+export function getMimeType(urlOrFilename: string): string {
+  const lower = urlOrFilename.toLowerCase();
+  if (lower.includes('.mp4') || lower.includes('.m4v')) return 'video/mp4';
+  if (lower.includes('.avi')) return 'video/x-msvideo';
+  if (lower.includes('.webm')) return 'video/webm';
+  if (lower.includes('.ts')) return 'video/mp2t';
+  if (lower.includes('.mov')) return 'video/quicktime';
+  return 'video/x-matroska';
+}
 
 /**
  * Find the primary local IPv4 address (e.g. 192.168.x.x or 10.x.x.x)
@@ -52,10 +64,12 @@ export function getProxyBaseUrl(customProxyHost?: string): string {
 
 /**
  * Formats a direct Easynews media URL into a proxied streaming URL.
+ * Includes the safe filename in the path so ExoPlayer can detect the container (.mkv/.mp4).
  */
 export function createProxiedStreamUrl(
   originalUrl: string,
-  options?: { enableProxy?: string | boolean; proxyHost?: string }
+  options?: { enableProxy?: string | boolean; proxyHost?: string },
+  fileName?: string
 ): string {
   // If proxy is explicitly disabled in config, return original URL
   if (
@@ -67,7 +81,22 @@ export function createProxiedStreamUrl(
   }
 
   const baseUrl = getProxyBaseUrl(options?.proxyHost);
-  return `${baseUrl}/proxy/stream?url=${encodeURIComponent(originalUrl)}`;
+
+  let safeName = 'video.mkv';
+  if (fileName) {
+    safeName = encodeURIComponent(fileName);
+  } else {
+    try {
+      const parsed = new URL(originalUrl);
+      const parts = parsed.pathname.split('/');
+      const last = parts[parts.length - 1];
+      if (last) safeName = encodeURIComponent(last);
+    } catch {
+      // fallback
+    }
+  }
+
+  return `${baseUrl}/proxy/stream/${safeName}?url=${encodeURIComponent(originalUrl)}`;
 }
 
 /**
@@ -91,27 +120,17 @@ export function extractAuthAndUrl(rawUrl: string): {
   return { cleanUrl: parsed.toString(), authHeader };
 }
 
-export interface ResolvedMetadata {
-  resolvedUrl: string;
-  totalSize?: number;
-  contentType?: string;
-}
-
 /**
- * Resolves the Easynews 302/307 edge redirect JIT and retrieves metadata.
+ * Resolves the Easynews 302/307 edge redirect JIT.
  * Issues a manual HEAD request to extract the pre-signed ?sig= edge CDN URL.
  */
-export async function resolveDirectUrlWithMeta(
+export async function resolveDirectUrl(
   targetUrl: string,
   fetchFn: typeof fetch = fetch
-): Promise<ResolvedMetadata> {
+): Promise<string> {
   const cached = redirectCache.get(targetUrl);
   if (cached && cached.expiresAt > Date.now()) {
-    return {
-      resolvedUrl: cached.resolvedUrl,
-      totalSize: cached.totalSize,
-      contentType: cached.contentType,
-    };
+    return cached.resolvedUrl;
   }
 
   const { cleanUrl, authHeader } = extractAuthAndUrl(targetUrl);
@@ -131,10 +150,6 @@ export async function resolveDirectUrlWithMeta(
   });
 
   const location = res.headers.get('location');
-  const contentLength = res.headers.get('content-length');
-  const contentType = res.headers.get('content-type') || undefined;
-  const totalSize = contentLength ? parseInt(contentLength, 10) : undefined;
-
   let resolvedUrl = targetUrl;
   if (res.status >= 300 && res.status < 400 && location) {
     resolvedUrl = new URL(location, cleanUrl).toString();
@@ -146,25 +161,15 @@ export async function resolveDirectUrlWithMeta(
 
   redirectCache.set(targetUrl, {
     resolvedUrl,
-    totalSize,
-    contentType,
     expiresAt: Date.now() + CACHE_TTL_MS,
   });
 
-  return { resolvedUrl, totalSize, contentType };
-}
-
-export async function resolveDirectUrl(
-  targetUrl: string,
-  fetchFn: typeof fetch = fetch
-): Promise<string> {
-  const meta = await resolveDirectUrlWithMeta(targetUrl, fetchFn);
-  return meta.resolvedUrl;
+  return resolvedUrl;
 }
 
 /**
  * Creates an Express request handler for proxying streaming media requests.
- * Uses Phase 3 MultiChunkDownloader for high throughput 4K Remux playback.
+ * Fully compatible with ExoPlayer / Stremio on Android TV.
  */
 export function createProxyHandler(fetchFn: typeof fetch = fetch) {
   return async function proxyStreamHandler(
@@ -179,15 +184,23 @@ export function createProxyHandler(fetchFn: typeof fetch = fetch) {
     }
 
     try {
-      const meta = await resolveDirectUrlWithMeta(targetUrl, fetchFn);
-      const { cleanUrl, authHeader } = extractAuthAndUrl(meta.resolvedUrl);
+      const resolvedUrl = await resolveDirectUrl(targetUrl, fetchFn);
+      const { cleanUrl, authHeader } = extractAuthAndUrl(resolvedUrl);
 
+      const mimeType = getMimeType(targetUrl);
+
+      // Setup headers for upstream edge server
       const forwardHeaders: Record<string, string> = {
         'User-Agent':
           (req.headers['user-agent'] as string) ||
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       };
 
+      if (req.headers.range) {
+        forwardHeaders['Range'] = req.headers.range as string;
+      }
+
+      // If resolvedUrl still has auth credentials, forward them
       if (authHeader) {
         forwardHeaders['Authorization'] = authHeader;
       } else {
@@ -197,102 +210,6 @@ export function createProxyHandler(fetchFn: typeof fetch = fetch) {
         }
       }
 
-      // Always ensure CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', '*');
-      res.setHeader('Accept-Ranges', 'bytes');
-
-      const isHead = req.method === 'HEAD';
-
-      // Parse Range header if present
-      const rangeHeader = req.headers.range as string | undefined;
-      let startByte = 0;
-      let endByte = meta.totalSize ? meta.totalSize - 1 : undefined;
-      let isRange = false;
-
-      if (rangeHeader) {
-        const matches = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-        if (matches) {
-          isRange = true;
-          startByte = parseInt(matches[1], 10);
-          if (matches[2]) {
-            endByte = parseInt(matches[2], 10);
-          } else if (meta.totalSize) {
-            endByte = meta.totalSize - 1;
-          }
-        }
-      }
-
-      // If HEAD request, respond with metadata headers
-      if (isHead) {
-        if (meta.contentType) {
-          res.setHeader('Content-Type', meta.contentType);
-        }
-        if (isRange && endByte !== undefined && meta.totalSize) {
-          res.status(206);
-          res.setHeader('Content-Range', `bytes ${startByte}-${endByte}/${meta.totalSize}`);
-          res.setHeader('Content-Length', (endByte - startByte + 1).toString());
-        } else if (meta.totalSize) {
-          res.status(200);
-          res.setHeader('Content-Length', meta.totalSize.toString());
-        } else {
-          res.status(200);
-        }
-        res.end();
-        return;
-      }
-
-      const requestedSpan =
-        endByte !== undefined ? endByte - startByte + 1 : undefined;
-
-      // Phase 3: Check if we can use MultiChunkDownloader
-      // Applicable if we have known total size and requested span > threshold
-      const enableMultiChunk =
-        process.env.ENABLE_MULTI_CHUNK !== 'false' &&
-        meta.totalSize !== undefined &&
-        endByte !== undefined &&
-        requestedSpan !== undefined &&
-        requestedSpan >= MULTI_CHUNK_THRESHOLD;
-
-      if (enableMultiChunk && meta.totalSize && endByte !== undefined) {
-        // Multi-connection chunk streaming (Phase 3)
-        const concurrency = +(process.env.CONCURRENT_CHUNKS ?? 4);
-        const chunkSize = +(process.env.CHUNK_SIZE_MB ?? 4) * 1024 * 1024;
-        const maxBufferChunks = +(process.env.MAX_BUFFER_CHUNKS ?? 12);
-
-        res.status(isRange ? 206 : 200);
-        if (meta.contentType) {
-          res.setHeader('Content-Type', meta.contentType);
-        }
-        if (isRange) {
-          res.setHeader(
-            'Content-Range',
-            `bytes ${startByte}-${endByte}/${meta.totalSize}`
-          );
-        }
-        res.setHeader('Content-Length', (endByte - startByte + 1).toString());
-
-        const downloader = new MultiChunkDownloader({
-          resolvedUrl: cleanUrl,
-          forwardHeaders,
-          startByte,
-          endByte,
-          totalSize: meta.totalSize,
-          chunkSize,
-          concurrency,
-          maxBufferChunks,
-          fetchFn,
-        });
-
-        downloader.pipe(res);
-        return;
-      }
-
-      // Fallback: Single-stream request (for small probes or when total size unknown)
-      if (rangeHeader) {
-        forwardHeaders['Range'] = rangeHeader;
-      }
-
       const abortController = new AbortController();
       res.on('close', () => {
         if (!res.writableEnded) {
@@ -300,41 +217,106 @@ export function createProxyHandler(fetchFn: typeof fetch = fetch) {
         }
       });
 
+      const isHead = req.method === 'HEAD';
+
+      // Request edge server directly with player method and headers
       const upstreamRes = await fetchFn(cleanUrl, {
-        method: 'GET',
+        method: isHead ? 'HEAD' : 'GET',
         headers: forwardHeaders,
         redirect: 'follow',
         signal: abortController.signal,
       });
 
-      res.status(upstreamRes.status);
-
-      const headersToForward = [
-        'content-type',
-        'content-length',
-        'content-range',
-        'accept-ranges',
-        'content-disposition',
-        'last-modified',
-        'etag',
-      ];
-
-      for (const header of headersToForward) {
-        const val = upstreamRes.headers.get(header);
-        if (val) {
-          res.setHeader(header, val);
+      if (upstreamRes.status >= 400) {
+        console.error(`[Proxy] Upstream edge returned error status ${upstreamRes.status}`);
+        if (!res.headersSent) {
+          res.status(upstreamRes.status).send(`Upstream edge error: ${upstreamRes.statusText}`);
         }
+        return;
       }
 
-      if (!upstreamRes.body) {
+      res.status(upstreamRes.status);
+
+      // CRITICAL FOR EXOPLAYER:
+      // Ensure Content-Type is NEVER null, empty, or text/html.
+      let upstreamContentType = upstreamRes.headers.get('content-type');
+      if (
+        !upstreamContentType ||
+        upstreamContentType.includes('text/html') ||
+        upstreamContentType.includes('text/plain') ||
+        upstreamContentType.includes('application/octet-stream')
+      ) {
+        upstreamContentType = mimeType;
+      }
+      res.setHeader('Content-Type', upstreamContentType);
+
+      // Forward Content-Length
+      const contentLength = upstreamRes.headers.get('content-length');
+      if (contentLength) {
+        res.setHeader('Content-Length', contentLength);
+      }
+
+      // Forward Content-Range
+      const contentRange = upstreamRes.headers.get('content-range');
+      if (contentRange) {
+        res.setHeader('Content-Range', contentRange);
+      }
+
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', '*');
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'Content-Type, Content-Length, Content-Range, Accept-Ranges'
+      );
+
+      if (isHead || !upstreamRes.body) {
         res.end();
         return;
       }
 
+      // Check if MultiChunkDownloader should be engaged for open-ended range playback
+      let totalSizeFromRange: number | undefined;
+      if (contentRange) {
+        const parts = contentRange.match(/\/(\d+)$/);
+        if (parts && parts[1]) {
+          totalSizeFromRange = parseInt(parts[1], 10);
+        }
+      }
+
+      const isMultiChunkEnabled =
+        process.env.ENABLE_MULTI_CHUNK === 'true' &&
+        totalSizeFromRange !== undefined &&
+        totalSizeFromRange > MULTI_CHUNK_THRESHOLD &&
+        req.headers.range &&
+        req.headers.range.endsWith('-');
+
+      if (isMultiChunkEnabled && totalSizeFromRange) {
+        const startMatch = req.headers.range!.match(/bytes=(\d+)-/);
+        const startByte = startMatch ? parseInt(startMatch[1], 10) : 0;
+        const endByte = totalSizeFromRange - 1;
+
+        const downloader = new MultiChunkDownloader({
+          resolvedUrl: cleanUrl,
+          forwardHeaders,
+          startByte,
+          endByte,
+          totalSize: totalSizeFromRange,
+          chunkSize: +(process.env.CHUNK_SIZE_MB ?? 4) * 1024 * 1024,
+          concurrency: +(process.env.CONCURRENT_CHUNKS ?? 4),
+          maxBufferChunks: +(process.env.MAX_BUFFER_CHUNKS ?? 12),
+          fetchFn,
+        });
+
+        downloader.pipe(res);
+        return;
+      }
+
+      // High-performance single-stream pipe directly from upstream CDN
       const nodeStream = Readable.fromWeb(upstreamRes.body as any);
       nodeStream.on('error', (err: any) => {
         if (err.name !== 'AbortError') {
-          console.error('Proxy single-stream pipeline error:', err);
+          console.error('[Proxy] Stream pipeline error:', err);
         }
       });
 
@@ -343,7 +325,7 @@ export function createProxyHandler(fetchFn: typeof fetch = fetch) {
       if (error.name === 'AbortError') {
         return;
       }
-      console.error('Proxy stream failed:', error);
+      console.error('[Proxy] Stream failed:', error);
       if (!res.headersSent) {
         res.status(502).send(`Proxy streaming error: ${error.message}`);
       }

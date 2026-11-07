@@ -163,7 +163,11 @@ builder.defineMetaHandler<Config>(
               fileExtension: getFileExtension(file),
               duration: getDuration(file),
               size: getSize(file),
-              url: createProxiedStreamUrl(directUrl, effectiveConfig),
+              url: createProxiedStreamUrl(
+                directUrl,
+                effectiveConfig,
+                `${title}${getFileExtension(file)}`
+              ),
               videoSize: file.rawSize,
             }),
           ],
@@ -331,7 +335,11 @@ builder.defineStreamHandler<Config>(
             duration: getDuration(file),
             size: getSize(file),
             title,
-            url: createProxiedStreamUrl(directUrl, options),
+            url: createProxiedStreamUrl(
+              directUrl,
+              options,
+              `${title}${getFileExtension(file)}`
+            ),
             videoSize: file.rawSize,
           })
         );

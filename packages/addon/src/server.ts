@@ -16,6 +16,7 @@ export function createServer(): express.Application {
 
   // Local Streaming Proxy endpoint (Phase 2: JIT Redirect Resolution)
   app.all('/proxy/stream', proxyStreamHandler);
+  app.all('/proxy/stream/:filename', proxyStreamHandler);
 
   // Stremio Addon Router
   app.use(getRouter(addonInterface));
