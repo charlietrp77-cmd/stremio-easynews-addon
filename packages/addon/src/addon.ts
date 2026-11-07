@@ -24,10 +24,22 @@ import { EasynewsAPI, SearchOptions, createBasic } from '@easynews/api';
 import { publicMetaProvider } from './meta.js';
 import { fromHumanReadable, toDirection } from './sort-option.js';
 import { landingTemplate } from '@stremio-addon/compat/landing-template';
+import { createProxiedStreamUrl } from './proxy.js';
+import {
+  shouldExcludeFile,
+  prioritizeStreams,
+  parseMediaInfo,
+} from './filter.js';
 
 type Config = {
   username: string;
   password: string;
+  enableProxy?: string | boolean;
+  proxyHost?: string;
+  maxFileSizeGb?: string;
+  excludeTrueHD?: string | boolean;
+  excludeDTSHD?: string | boolean;
+  deprioritizeLosslessAudio?: string | boolean;
   sort1?: string;
   sort1Direction?: string;
   sort2?: string;
@@ -65,11 +77,50 @@ builder.defineCatalogHandler<Config>(async ({ extra: { search } }) => {
 });
 
 builder.defineMetaHandler<Config>(
-  async ({ id, type, config: { username, password } }) => {
+  async ({ id, type, config: rawConfig }) => {
     try {
+      const config = rawConfig ?? ({} as Config);
+      const username =
+        config.username ||
+        process.env.EASYNEWS_USERNAME ||
+        process.env.USERNAME ||
+        '';
+      const password =
+        config.password ||
+        process.env.EASYNEWS_PASSWORD ||
+        process.env.PASSWORD ||
+        '';
+
       if (!id.startsWith(catalog.id)) {
         return { meta: null as unknown as MetaDetail };
       }
+
+      if (!username || !password) {
+        logError({
+          message:
+            'Missing Easynews credentials in config or EASYNEWS_USERNAME/EASYNEWS_PASSWORD environment variables',
+          error: new Error('Missing credentials'),
+          context: { resource: 'meta', id, type },
+        });
+        return { meta: null as unknown as MetaDetail };
+      }
+
+      const effectiveConfig: Config = {
+        ...config,
+        username,
+        password,
+        maxFileSizeGb:
+          config.maxFileSizeGb || process.env.MAX_FILE_SIZE_GB,
+        excludeTrueHD:
+          config.excludeTrueHD ??
+          (process.env.EXCLUDE_TRUEHD === 'true' || process.env.EXCLUDE_TRUEHD === '1'),
+        excludeDTSHD:
+          config.excludeDTSHD ??
+          (process.env.EXCLUDE_DTSHD === 'true' || process.env.EXCLUDE_DTSHD === '1'),
+        deprioritizeLosslessAudio:
+          config.deprioritizeLosslessAudio ??
+          (process.env.DEPRIORITIZE_LOSSLESS !== 'false'),
+      };
 
       const search = decodeURIComponent(id.replace(prefix, ''));
 
@@ -78,12 +129,26 @@ builder.defineMetaHandler<Config>(
       const api = new EasynewsAPI({ username, password });
       const res = await api.searchAll({ query: search });
 
-      for (const file of res?.data ?? []) {
+      const rawFiles = res?.data ?? [];
+      const filteredFiles = rawFiles.filter((file) => {
         const title = getPostTitle(file);
-
         if (isBadVideo(file) || !matchesTitle(title, search, false)) {
-          continue;
+          return false;
         }
+        if (shouldExcludeFile(file, effectiveConfig)) {
+          return false;
+        }
+        return true;
+      });
+
+      const sortedFiles = prioritizeStreams(
+        filteredFiles.map((file) => ({ title: getPostTitle(file), file })),
+        effectiveConfig
+      ).map((item) => item.file!);
+
+      for (const file of sortedFiles) {
+        const title = getPostTitle(file);
+        const directUrl = `${createStreamUrl(res, username, password)}/${createStreamPath(file)}`;
 
         videos.push({
           id: `${prefix}${file.sig}`,
@@ -98,7 +163,7 @@ builder.defineMetaHandler<Config>(
               fileExtension: getFileExtension(file),
               duration: getDuration(file),
               size: getSize(file),
-              url: `${createStreamUrl(res, username, password)}/${createStreamPath(file)}`,
+              url: createProxiedStreamUrl(directUrl, effectiveConfig),
               videoSize: file.rawSize,
             }),
           ],
@@ -131,11 +196,50 @@ builder.defineMetaHandler<Config>(
 );
 
 builder.defineStreamHandler<Config>(
-  async ({ id, type, config: { username, password, ...options } }) => {
+  async ({ id, type, config: rawConfig }) => {
     try {
+      const config = rawConfig ?? ({} as Config);
+      const username =
+        config.username ||
+        process.env.EASYNEWS_USERNAME ||
+        process.env.USERNAME ||
+        '';
+      const password =
+        config.password ||
+        process.env.EASYNEWS_PASSWORD ||
+        process.env.PASSWORD ||
+        '';
+
       if (!id.startsWith('tt')) {
         return { streams: [] };
       }
+
+      if (!username || !password) {
+        logError({
+          message:
+            'Missing Easynews credentials in request config or EASYNEWS_USERNAME/EASYNEWS_PASSWORD environment variables',
+          error: new Error('Missing credentials'),
+          context: { resource: 'stream', id, type },
+        });
+        return { streams: [] };
+      }
+
+      const options: Config = {
+        ...config,
+        username,
+        password,
+        maxFileSizeGb:
+          config.maxFileSizeGb || process.env.MAX_FILE_SIZE_GB,
+        excludeTrueHD:
+          config.excludeTrueHD ??
+          (process.env.EXCLUDE_TRUEHD === 'true' || process.env.EXCLUDE_TRUEHD === '1'),
+        excludeDTSHD:
+          config.excludeDTSHD ??
+          (process.env.EXCLUDE_DTSHD === 'true' || process.env.EXCLUDE_DTSHD === '1'),
+        deprioritizeLosslessAudio:
+          config.deprioritizeLosslessAudio ??
+          (process.env.DEPRIORITIZE_LOSSLESS !== 'false'),
+      };
 
       // Sort options are profiled as human-readable strings in the manifest.
       // so we need to convert them back to their internal representation
@@ -173,11 +277,12 @@ builder.defineStreamHandler<Config>(
 
       const streams: Stream[] = [];
 
-      for (const file of res.data ?? []) {
+      const rawFiles = res.data ?? [];
+      const candidateFiles = rawFiles.filter((file) => {
         const title = getPostTitle(file);
 
         if (isBadVideo(file)) {
-          continue;
+          return false;
         }
 
         // For series there are multiple possible queries that could match the title.
@@ -191,15 +296,33 @@ builder.defineStreamHandler<Config>(
           ];
 
           if (!queries.some((query) => matchesTitle(title, query, false))) {
-            continue;
+            return false;
           }
         }
 
         // Movie titles should match the query strictly.
         // Other content types are loosely matched.
         if (!matchesTitle(title, query, type === 'movie')) {
-          continue;
+          return false;
         }
+
+        // Phase 1: Smart File Size Cap & Audio Codec Filtering
+        if (shouldExcludeFile(file, options)) {
+          return false;
+        }
+
+        return true;
+      });
+
+      // Phase 1: Deprioritize lossless audio (TrueHD, DTS-HD) if enabled
+      const prioritizedFiles = prioritizeStreams(
+        candidateFiles.map((file) => ({ title: getPostTitle(file), file })),
+        options
+      ).map((item) => item.file!);
+
+      for (const file of prioritizedFiles) {
+        const title = getPostTitle(file);
+        const directUrl = `${createStreamUrl(res, username, password)}/${createStreamPath(file)}`;
 
         streams.push(
           mapStream({
@@ -208,7 +331,7 @@ builder.defineStreamHandler<Config>(
             duration: getDuration(file),
             size: getSize(file),
             title,
-            url: `${createStreamUrl(res, username, password)}/${createStreamPath(file)}`,
+            url: createProxiedStreamUrl(directUrl, options),
             videoSize: file.rawSize,
           })
         );
@@ -244,14 +367,21 @@ function mapStream({
   fullResolution: string | undefined;
 }): Stream {
   const quality = getQuality(title, fullResolution);
+  const media = parseMediaInfo(title);
+  const audioInfo = media.audioTags.length
+    ? `🔊 ${media.audioTags.join(' / ')}`
+    : undefined;
+
+  const descLines = [
+    `${title}${fileExtension}`,
+    audioInfo,
+    `🕛 ${duration ?? 'unknown duration'}`,
+    `📦 ${size ?? 'unknown size'}`,
+  ].filter(Boolean) as string[];
 
   return {
     name: `Easynews+${quality ? `\n${quality}` : ''}`,
-    description: [
-      `${title}${fileExtension}`,
-      `🕛 ${duration ?? 'unknown duration'}`,
-      `📦 ${size ?? 'unknown size'}`,
-    ].join('\n'),
+    description: descLines.join('\n'),
     url: url,
     behaviorHints: {
       fileName: title,

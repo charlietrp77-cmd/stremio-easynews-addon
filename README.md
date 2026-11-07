@@ -96,6 +96,21 @@ Navigate to `http://localhost:1337/` in your browser to verify that the addon is
 $ PORT=8080 pnpm start:addon
 ```
 
+### High-Performance Local Streaming Proxy (4K Blu-Ray Remuxes)
+
+When self-hosting on your local network (PC, home server, NAS, or Docker), the addon includes a built-in multi-connection streaming proxy with JIT redirect resolution:
+
+* **JIT Redirect Resolution**: Solves single-threaded TCP bottlenecks and CDN geo-routing mismatches by resolving edge CDN nodes (`ams-dl-01.easynews.com`) directly from your home network connection.
+* **Concurrent Chunk Fetching**: Opens 4 to 8 parallel HTTP Range requests simultaneously, multiplying effective download speeds to smoothly stream 50–90 GB 4K Blu-ray Remuxes without buffering.
+* **Smart Audio & Codec Filtering**: Configurable filters in Stremio's configure page to cap file sizes and hide/deprioritize `TrueHD` or `DTS-HD` tracks that trigger heavy software decoding on constrained TV streaming devices.
+
+#### Configuration Environment Variables:
+* `PROXY_URL`: Explicit base URL for proxy streaming (e.g. `http://192.168.1.50:1337`). Defaults to your machine's auto-detected LAN IP.
+* `CONCURRENT_CHUNKS`: Number of parallel chunk requests (default: `4`).
+* `CHUNK_SIZE_MB`: Chunk size in megabytes (default: `4`).
+* `MAX_BUFFER_CHUNKS`: RAM cache buffer size in chunks (default: `12` chunks = ~48 MB).
+* `ENABLE_LOCAL_PROXY`: Set to `false` to disable the proxy and use direct Easynews links.
+
 ---
 
 Looking for additional hosting options? Let us know which platform(s) you'd like to see supported by [creating an issue](https://github.com/sleeyax/stremio-easynews-addon/issues/new).

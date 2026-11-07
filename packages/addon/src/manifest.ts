@@ -20,6 +20,11 @@ export const catalog: ManifestCatalog = {
 const sortOptions = humanReadableSortOptions as any;
 const directionOptions = humanReadableDirections as any;
 
+export const hasEnvCredentials = !!(
+  (process.env.EASYNEWS_USERNAME || process.env.USERNAME) &&
+  (process.env.EASYNEWS_PASSWORD || process.env.PASSWORD)
+);
+
 export const manifest: Manifest & {
   stremioAddonsConfig: { issuer: string; signature: string };
 } = {
@@ -37,10 +42,69 @@ export const manifest: Manifest & {
   background:
     'https://images.pexels.com/photos/518543/pexels-photo-518543.jpeg',
   logo: 'https://pbs.twimg.com/profile_images/479627852757733376/8v9zH7Yo_400x400.jpeg',
-  behaviorHints: { configurable: true, configurationRequired: true },
+  behaviorHints: {
+    configurable: true,
+    configurationRequired: !hasEnvCredentials,
+  },
   config: [
-    { title: 'username', key: 'username', type: 'text' },
-    { title: 'password', key: 'password', type: 'password' },
+    {
+      title: 'username',
+      key: 'username',
+      type: 'text',
+      default: process.env.EASYNEWS_USERNAME || process.env.USERNAME || '',
+      required: !hasEnvCredentials,
+    },
+    {
+      title: 'password',
+      key: 'password',
+      type: 'password',
+      default: process.env.EASYNEWS_PASSWORD || process.env.PASSWORD || '',
+      required: !hasEnvCredentials,
+    },
+    {
+      title: 'Enable Local Streaming Proxy (JIT Redirect)',
+      key: 'enableProxy',
+      type: 'checkbox',
+      default: 'checked',
+    },
+    {
+      title: 'Custom Proxy Host (e.g. http://192.168.1.50:1337 - optional)',
+      key: 'proxyHost',
+      type: 'text',
+    },
+    {
+      title: 'Max File Size Cap',
+      key: 'maxFileSizeGb',
+      type: 'select',
+      options: [
+        'No limit',
+        '5 GB',
+        '10 GB',
+        '15 GB',
+        '20 GB',
+        '25 GB',
+        '30 GB',
+        '40 GB',
+        '50 GB',
+      ],
+      default: 'No limit',
+    },
+    {
+      title: 'Exclude TrueHD Audio (TV compatibility)',
+      key: 'excludeTrueHD',
+      type: 'checkbox',
+    },
+    {
+      title: 'Exclude DTS-HD / DTS-X Audio',
+      key: 'excludeDTSHD',
+      type: 'checkbox',
+    },
+    {
+      title: 'Deprioritize Lossless Audio (favor EAC3 / AAC)',
+      key: 'deprioritizeLosslessAudio',
+      type: 'checkbox',
+      default: 'checked',
+    },
     {
       title: 'Sort 1st',
       key: 'sort1',
