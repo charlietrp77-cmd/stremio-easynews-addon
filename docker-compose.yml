@@ -6,28 +6,22 @@ services:
     image: stremio-easynews-addon:latest
     container_name: stremio-easynews-addon
     restart: unless-stopped
-    ports:
-      - "1337:1337"
+    expose:
+      - "1337"
     environment:
       - PORT=1337
 
       # =========================================================================
       # EASYNEWS CREDENTIALS (NO URL SETUP NEEDED!):
-      # Setting these environment variables allows 1-click install in Stremio.
-      # You can directly install: http://<YOUR_SERVER_LAN_IP>:1337/manifest.json
-      # without needing to encode username & password into the Stremio URL.
       # =========================================================================
       - EASYNEWS_USERNAME=your_username_here
       - EASYNEWS_PASSWORD=your_password_here
 
       # =========================================================================
-      # CRITICAL FOR PORTAINER / DOCKER BRIDGED NETWORKS:
-      # Set PROXY_URL to your Portainer/Docker host's LAN IP address, e.g.:
-      # http://192.168.1.100:1337
-      # This ensures Android TV / client devices stream from your host's IP,
-      # rather than Docker's internal container IP (172.17.x.x).
+      # PUBLIC HTTPS PROXY URL (HANDLED BY CADDY):
+      # Set this to your domain (e.g. https://easynews.yourdomain.com)
       # =========================================================================
-      - PROXY_URL=http://<YOUR_SERVER_LAN_IP>:1337
+      - PROXY_URL=https://${DOMAIN_NAME:-easynews.yourdomain.com}
 
       # Streaming Performance & Multi-Connection Tuning (Phases 2 & 3)
       - CONCURRENT_CHUNKS=4       # Parallel connections to CDN (4 to 8 recommended for 4K Remux)
@@ -36,14 +30,24 @@ services:
       - ENABLE_LOCAL_PROXY=true   # JIT redirect resolution & local proxying
       - ENABLE_MULTI_CHUNK=true   # Multi-connection range streaming for high bitrates
 
-      # Optional Default Audio & Filter Preferences (can also be overridden in configure UI)
-      # - MAX_FILE_SIZE_GB=25     # e.g. 25 GB cap (or omit for No limit)
-      # - EXCLUDE_TRUEHD=false    # Set true to filter out TrueHD tracks
-      # - EXCLUDE_DTSHD=false     # Set true to filter out DTS-HD tracks
-      # - DEPRIORITIZE_LOSSLESS=true # Place EAC3 / AAC before TrueHD / DTS-HD
+  # =============================================================================
+  # CADDY: AUTOMATIC ZERO-CONFIG HTTPS REVERSE PROXY
+  # Obtains and auto-renews free trusted SSL certificates from Let's Encrypt
+  # =============================================================================
+  caddy:
+    image: caddy:alpine
+    container_name: caddy-easynews-ssl
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME:-easynews.yourdomain.com}
+    command: caddy reverse-proxy --from ${DOMAIN_NAME:-easynews.yourdomain.com} --to stremio-easynews-addon:1337
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
 
-    # OPTIONAL ALTERNATIVE FOR LINUX DOCKER HOSTS:
-    # If your Portainer host is running Linux, you can uncomment network_mode: host
-    # and remove the "ports" block above. In host mode, the addon will automatically
-    # detect your host's LAN IP without needing PROXY_URL manually set.
-    # network_mode: host
+volumes:
+  caddy_data:
+  caddy_config:
